@@ -144,12 +144,21 @@ the flow for the corresponding features has been found, otherwise, it is set to 
 corresponding feature, type of the error measure can be set in flags parameter; if the flow wasn't
 found then the error is not defined (use the status parameter to find such cases).
 @param winSize size of the search window at each pyramid level.
+@param winSize 搜索窗口的大小，默认值为 (21, 21)，表示在光流计算过程中，算法会在这个窗口范围内搜索每个特征点的最佳匹配。
+窗口越大，计算量越大，但可能会提高匹配的鲁棒性；窗口越小，计算量越小，但可能容易受到噪声的影响。
+
 @param maxLevel 0-based maximal pyramid level number; if set to 0, pyramids are not used (single
 level), if set to 1, two levels are used, and so on; if pyramids are passed to input then
 algorithm will use as many levels as pyramids have but no more than maxLevel.
 @param criteria parameter, specifying the termination criteria of the iterative search algorithm
 (after the specified maximum number of iterations criteria.maxCount or when the search window
 moves by less than criteria.epsilon.
+
+@param criteria 终止条件。它定义了光流计算的停止标准。默认值为 TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, 30, 0.01)：
+COUNT：最大迭代次数为 30。
+EPS：误差容忍度为 0.01，当误差小于这个值时，算法会停止迭代。
+当这两个条件中的任意一个满足时，算法会停止迭代。
+
 @param flags operation flags:
  -   **OPTFLOW_USE_INITIAL_FLOW** uses initial estimations, stored in nextPts; if the flag is
      not set, then prevPts is copied to nextPts and is considered the initial estimate.
@@ -162,6 +171,15 @@ optical flow equations (this matrix is called a spatial gradient matrix in @cite
 by number of pixels in a window; if this value is less than minEigThreshold, then a corresponding
 feature is filtered out and its flow is not processed, so it allows to remove bad points and get a
 performance boost.
+
+@param minEigThreshold 在光流算法中，算法会计算一个 2x2 的矩阵的最小特征值，
+该矩阵包含了光流方程的空间梯度信息（在文献引用中，称为空间梯度矩阵，见 @cite Bouguet00），
+这个矩阵是通过局部窗口中的像素数据计算得出的。该最小特征值会除以窗口中的像素数量。
+如果计算出的值小于 minEigThreshold，则对应的特征点会被过滤掉，不再处理其光流，
+因此，这种方法能够去除质量较差的点，并提高算法的性能。
+
+@param minEigThreshold 最小特征值阈值，默认值为 1e-4。特征值用于计算每个窗口的质量，
+只有当该窗口的最小特征值大于该阈值时，才认为这个窗口的匹配是有效的。这个参数可以帮助排除低质量的特征点。
 
 The function implements a sparse iterative version of the Lucas-Kanade optical flow in pyramids. See
 @cite Bouguet00 . The function is parallelized with the TBB library.

@@ -197,9 +197,10 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
     // cn是图像的通道数，cn2是通道数的两倍（用于梯度）
     int j, cn = I.channels(), cn2 = cn*2;
     cv::AutoBuffer<deriv_type> _buf(winSize.area()*(cn + cn2)); // 创建一个缓冲区用于存储图像窗口和梯度信息
-    int derivDepth = DataType<deriv_type>::depth; // 获取梯度数据的深度
+    int derivDepth = DataType<deriv_type>::depth; // 获取梯度数据的深度: CV_16S,表示每个数据是16-bit signed类型
 
     // 创建用于存储窗口内图像数据的矩阵（包括图像和梯度）：创建图像窗口的缓冲区和梯度窗口的缓冲区
+    // 对于默认参数来说IWinBuf \ derivIWinBuf是 21*21大小的Mat.
     Mat IWinBuf(winSize, CV_MAKETYPE(derivDepth, cn), _buf.data());
     Mat derivIWinBuf(winSize, CV_MAKETYPE(derivDepth, cn2), _buf.data() + winSize.area()*cn);
 
@@ -291,17 +292,21 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
 #endif
 
-        // 从前一帧图像中提取特征点所在的窗口，并计算该窗口的梯度
+        // 从前一帧图像中提取特征点所在的窗口，并计算该窗口的梯度的协方差矩阵
+        // 该小窗口是以prevPt为中心构建的winSize大小的窗口
+        // 计算该小窗口内每个点的加权像素值和梯度值
         // extract the patch from the first image, compute covariation matrix of derivatives
         int x, y;
+        // 按行遍历该小窗口的灰度值和梯度值
         for( y = 0; y < winSize.height; y++ )
         {
-            // 获取当前行的图像数据和梯度数据
+            // 获取小窗口的当前行（第y行）的图像强度值指针和梯度值指针
             const uchar* src = I.ptr() + (y + iprevPt.y)*stepI + iprevPt.x*cn;
             const deriv_type* dsrc = derivI.ptr<deriv_type>() + (y + iprevPt.y)*dstep + iprevPt.x*cn2;
 
-            deriv_type* Iptr = IWinBuf.ptr<deriv_type>(y); // 当前窗口的图像数据指针
-            deriv_type* dIptr = derivIWinBuf.ptr<deriv_type>(y); // 当前窗口的梯度数据指针
+            // Iptr 和 dIptr 是用于存储当前行的加权像素值和梯度信息的指针，分别指向 IWinBuf 和 derivIWinBuf（这两个矩阵用于存储图像窗口和梯度窗口的加权值）。
+            deriv_type* Iptr = IWinBuf.ptr<deriv_type>(y); // winSize大小的窗口的图像数据指针
+            deriv_type* dIptr = derivIWinBuf.ptr<deriv_type>(y); // winSize大小的窗口的梯度数据指针
 
             x = 0;
 
@@ -461,9 +466,11 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             }
 #endif
 
-            // 遍历窗口中的每个像素，计算其加权值并更新协方差矩阵
+            //然后对于每一行 按列遍历窗口中的每个像素，计算其强度和梯度加权值并更新协方差矩阵
+            // dsrc += 2 和 dIptr += 2 是为了每次跳过两个元素，分别对应图像梯度在 x 和 y 方向上的变化。
             for( ; x < winSize.width*cn; x++, dsrc += 2, dIptr += 2 )
             {
+                // 双线性插值计算图像灰度值、x方向梯度、y方向梯度
                 int ival = CV_DESCALE(src[x]*iw00 + src[x+cn]*iw01 +
                                       src[x+stepI]*iw10 + src[x+stepI+cn]*iw11, W_BITS1-5);
                 int ixval = CV_DESCALE(dsrc[0]*iw00 + dsrc[cn2]*iw01 +
@@ -471,10 +478,15 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
                 int iyval = CV_DESCALE(dsrc[1]*iw00 + dsrc[cn2+1]*iw01 + dsrc[dstep+1]*iw10 +
                                        dsrc[dstep+cn2+1]*iw11, W_BITS1);
 
-                Iptr[x] = (short)ival; // 存储图像窗口中的加权值
-                dIptr[0] = (short)ixval; // 存储x方向梯度
-                dIptr[1] = (short)iyval; // 存储y方向梯度
+                // 将计算出的加权像素值和梯度值存入 IWinBuf 和 derivIWinBuf。
+                Iptr[x] = (short)ival; // 存储强度加权值
+                dIptr[0] = (short)ixval; // 存储x方向梯度加权值
+                dIptr[1] = (short)iyval; // 存储y方向梯度加权值
 
+                // 这部分计算了梯度协方差矩阵的元素：
+                // A11 是 x 方向的梯度平方的总和。
+                // A12 是 x 和 y 方向的梯度乘积的总和。
+                // A22 是 y 方向的梯度平方的总和。
                 iA11 += (itemtype)(ixval*ixval); // 计算协方差矩阵元素
                 iA12 += (itemtype)(ixval*iyval);
                 iA22 += (itemtype)(iyval*iyval);
@@ -498,8 +510,17 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
         A12 = iA12*FLT_SCALE;
         A22 = iA22*FLT_SCALE;
 
+        // 关于奇异矩阵的补充说明：
+        // 满秩矩阵对应非奇异矩阵，非零行列式是矩阵可逆的充分必要条件。
+        // 可逆矩阵就是非奇异矩阵，非奇异矩阵也是可逆矩阵。 如果A为奇异矩阵，则AX=0有无穷解，AX=b有无穷解或者无解。
+        // 如果A为非奇异矩阵，则AX=0有且只有唯一零解，AX=b有唯一解。
+
         // 计算协方差矩阵的行列式和最小特征值
         float D = A11*A22 - A12*A12;
+        // 计算特征值的方程：det(A−λI)=0
+        // 对于2阶矩阵|a b|来说：得到一个关于λ的二次方程λ^2-(a+d)λ+(ad−bc)=0
+        //           |c d|
+        // 求解λ，有两个解，由最小的λ即可得到下式：
         float minEig = (A22 + A11 - std::sqrt((A11-A22)*(A11-A22) +
                         4.f*A12*A12))/(2*winSize.width*winSize.height);
 
@@ -507,22 +528,41 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
         if( err && (flags & OPTFLOW_LK_GET_MIN_EIGENVALS) != 0 )
             err[ptidx] = (float)minEig;
 
+        // 具体步骤是：
+        // 1、计算最小特征值： 该矩阵的最小特征值（minEig）被计算出来。
+        // 2、归一化： 这个最小特征值会被窗口中的像素数目除以，得到一个归一化的最小特征值。
+        // 3、阈值判断： 如果这个归一化的最小特征值小于给定的阈值（minEigThreshold），则该特征点会被过滤掉，不再参与光流计算。
+        // 作用：
+        // 1、过滤不可靠的特征点： 当光流计算时，某些区域的特征点可能由于图像的纹理较少、对比度较低或噪声较大，导致计算出的最小特征值非常小，表明这些区域的光流计算不可靠。
+        // 通过设置一个阈值 minEigThreshold，算法可以过滤掉这些“坏”特征点。
+        // 2、提高性能： 通过去除不可靠的特征点，算法可以集中计算更稳定、更可靠的特征点，从而提升整体的计算效率和精度。
         // 如果最小特征值小于阈值或者行列式接近零，认为光流计算不可靠，跳过该点
         if( minEig < minEigThreshold || D < FLT_EPSILON )
         {
             if( level == 0 && status )
                 status[ptidx] = false;
+            // 如果一个矩阵的行列式或者其最小特征值接近于0，这表明矩阵接近于奇异（即，不可逆）
+            // 奇异矩阵至少有一个特征值为零。这是因为矩阵的行列式是其所有特征值的乘积，如果行列式为零，至少有一个特征值必须为零。
             continue;
         }
 
         D = 1.f/D;
 
-        // 计算特征点在当前帧中的平移
+        // 计算特征点在当前帧中的位移
         nextPt -= halfWin;
         Point2f prevDelta;
 
+        /*
+        在 OpenCV 中，TermCriteria 是一个用于定义迭代停止条件的类，它通常用于迭代算法，比如 K-means 聚类或光流计算等。构造函数中的参数决定了迭代停止的标准。
+        TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, 30, 0.01) 的具体含义如下：
+        TermCriteria::COUNT：表示最大迭代次数的限制。此处的 30 表示算法最多允许迭代 30 次。
+        TermCriteria::EPS：表示精度的限制，即当结果变化的幅度小于这个值时，算法停止迭代。此处的 0.01 表示当算法的结果（如误差、位置等）变化小于 0.01 时，停止迭代。
+        COUNT + EPS：这表示停止条件是基于迭代次数或精度中的一个或两个条件都满足时停止迭代。如果满足迭代次数达到 30 次，或者精度（变化小于 0.01）达到要求，就会停止迭代。
+        总结：
+        TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, 30, 0.01) 表示在最多迭代 30 次，或者当算法的结果变化小于 0.01 时就停止迭代。
+        */
         // 迭代计算特征点的平移，直到满足收敛条件
-        for( j = 0; j < criteria.maxCount; j++ )
+        for( j = 0; j < criteria.maxCount; j++ ) // 遍历迭代次数
         {
             inextPt.x = cvFloor(nextPt.x);
             inextPt.y = cvFloor(nextPt.y);
@@ -562,9 +602,14 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
 #endif
 
+            // 按行遍历小窗口
             for( y = 0; y < winSize.height; y++ )
             {
+                // Jptr 和 Iptr 分别指向当前帧和前一帧的图像数据，dIptr 是前一帧的梯度信息。
+                // 在当前帧J上获取小窗口的第y行像素值（或说灰度值或说强度值）指针
                 const uchar* Jptr = J.ptr() + (y + inextPt.y)*stepJ + inextPt.x*cn;
+
+                // 获取对应的I帧上的小窗口的加权灰度值和梯度值指针
                 const deriv_type* Iptr = IWinBuf.ptr<deriv_type>(y);
                 const deriv_type* dIptr = derivIWinBuf.ptr<deriv_type>(y);
 
@@ -673,11 +718,28 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
                 for( ; x < winSize.width*cn; x++, dIptr += 2 )
                 {
+                    /*
+                     正向光流与反向光流的区别：
+                    正向光流： 给定前一帧图像，计算特征点或像素在当前帧的位置。
+                    反向光流： 给定当前帧图像，计算特征点或像素在前一帧的位置。
+                    在实际应用中，反向光流常常用于验证光流的质量，或者作为正向光流计算的对照。
+                    比如，计算正向光流后，我们可以使用反向光流来确认正向光流的估算是否可靠。具体来说，反向光流的主要用途有以下几点：
+
+                    验证： 正向光流和反向光流应该相互一致。也就是说，如果一个点从上一帧到当前帧的光流是正确的，
+                    那么使用反向光流再从当前帧回到上一帧时，应该能够恢复到原来的位置。如果这种一致性差，说明光流计算可能存在误差。
+                    增加鲁棒性： 在计算中使用正向光流和反向光流的结合，能够减少由图像噪声和光照变化等因素引起的误差。
+                    处理运动模糊： 在一些特定场景下，反向光流可以帮助缓解正向光流在模糊图像中的估计问题。
+                     * 反向光流，即从当前帧追踪到上一帧
+                     * 补充说明：似乎这里用的是反向光流法（即正向光流里面关于计算雅可比用的是反向光流的思路，称之为反向光流法）
+                     SLAM十四讲P214:
+                     在反向光流中，I1(x,y)的梯度是保持不变的，当雅可比不变时，H矩阵不变，每次迭代只需计算残差
+                     */
+                    // 计算光度残差：双线性插值加权后的灰度值减去第i帧对应的灰度值
                     int diff = CV_DESCALE(Jptr[x]*iw00 + Jptr[x+cn]*iw01 +
                                           Jptr[x+stepJ]*iw10 + Jptr[x+stepJ+cn]*iw11,
                                           W_BITS1-5) - Iptr[x];
-                    ib1 += (itemtype)(diff*dIptr[0]);
-                    ib2 += (itemtype)(diff*dIptr[1]);
+                    ib1 += (itemtype)(diff*dIptr[0]); // r * dx的累加
+                    ib2 += (itemtype)(diff*dIptr[1]); // r * dy的累加
                 }
             }
 
@@ -698,29 +760,33 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             b2 = ib2*FLT_SCALE;
 
             // 计算光流的位移量
+            // 设: A=J^T*J, b =-J^T*r, J= (I_x, I_y)
+            // 根据Aδx =-b,可求得如下增量δ：
             Point2f delta( (float)((A12*b2 - A22*b1) * D),
                           (float)((A12*b1 - A11*b2) * D));
             //delta = -delta;
 
-            nextPt += delta;
-            nextPts[ptidx] = nextPt + halfWin;
+            nextPt += delta; // 更新 nextPt，即特征点在当前帧中的新位置。
+            nextPts[ptidx] = nextPt + halfWin; // 更新 nextPts[ptidx]，记录当前特征点的新位置
 
             // 如果光流的位移小于阈值，则认为已经收敛
-            if( delta.ddot(delta) <= criteria.epsilon )
+            if( delta.ddot(delta) <= criteria.epsilon ) // 位移增量的2范数的平方小于阈值认为收敛
                 break;
 
             // 如果两次迭代的位移差异非常小，认为已经收敛
             if( j > 0 && std::abs(delta.x + prevDelta.x) < 0.01 &&
                std::abs(delta.y + prevDelta.y) < 0.01 )
             {
+                // 如果迭代过程收敛，微调特征点的位置（减去一半的位移量）并跳出循环
                 nextPts[ptidx] -= delta*0.5f;
                 break;
             }
-            prevDelta = delta;
+            prevDelta = delta; // 更新 prevDelta 为当前的 delta，为下一次迭代做准备。
         }
 
         // 如果需要，计算特征点的误差值
         CV_Assert(status != NULL);
+        // status[ptidx]初值为true
         if( status[ptidx] && err && level == 0 && (flags & OPTFLOW_LK_GET_MIN_EIGENVALS) == 0 )
         {
             // 计算当前特征点的误差值
@@ -734,7 +800,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
                 inextPoint.y < -winSize.height || inextPoint.y >= J.rows )
             {
                 if( status )
-                    status[ptidx] = false;
+                    status[ptidx] = false; // 如果追踪得到的坐标超出当前帧图像范围，认为追踪失败。
                 continue;
             }
 
@@ -761,7 +827,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
                     errval += std::abs((float)diff);
                 }
             }
-            err[ptidx] = errval * 1.f/(32*winSize.width*cn*winSize.height);
+            err[ptidx] = errval * 1.f/(32*winSize.width*cn*winSize.height); // 保存平均光度误差
         }
     }
 }

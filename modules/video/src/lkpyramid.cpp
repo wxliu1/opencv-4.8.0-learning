@@ -180,6 +180,12 @@ typedef float acctype;
 typedef float itemtype;
 #endif
 
+/*
+Lucas-Kanade光流法（Lucas-Kanade Optical Flow） 是一种基于局部图像窗口的光流估计方法
+Lucas-Kanade方法通过假设在小的时间间隔内，图像中的局部区域（通常是一个小窗口）内的所有像素点的运动是相同的，
+因此通过这种假设来估计图像中每个像素的运动。具体来说，它通过两帧图像（当前帧和前一帧）之间的亮度变化来估计像素的运动，
+推算出从前一帧到当前帧的光流。这个过程就是正向光流的计算。
+*/
 // @brief: tbb多线程并行调用仿函数来对多个点进行光流跟踪
 // Lucas-Kanade光流追踪算法的实现，用于计算连续帧之间特征点的位移。
 // 在每次迭代中，它通过计算图像的局部梯度和协方差矩阵来估算特征点的运动，并通过最小化误差来更新光流估计。
@@ -521,6 +527,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
         // 对于2阶矩阵|a b|来说：得到一个关于λ的二次方程λ^2-(a+d)λ+(ad−bc)=0
         //           |c d|
         // 求解λ，有两个解，由最小的λ即可得到下式：
+        // λ_{min} = ((a + d) - sqrt((a + d)^2 - 4(ad -bc))) / 2
         float minEig = (A22 + A11 - std::sqrt((A11-A22)*(A11-A22) +
                         4.f*A12*A12))/(2*winSize.width*winSize.height);
 
@@ -561,7 +568,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
         总结：
         TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, 30, 0.01) 表示在最多迭代 30 次，或者当算法的结果变化小于 0.01 时就停止迭代。
         */
-        // 迭代计算特征点的平移，直到满足收敛条件
+        // 迭代计算特征点的平移，直到满足收敛条件:迭代直到光流收敛（即位移增量小于某个阈值），或者达到最大迭代次数。
         for( j = 0; j < criteria.maxCount; j++ ) // 遍历迭代次数
         {
             inextPt.x = cvFloor(nextPt.x);
@@ -784,9 +791,10 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             prevDelta = delta; // 更新 prevDelta 为当前的 delta，为下一次迭代做准备。
         }
 
-        // 如果需要，计算特征点的误差值
+        // 如果光流追踪成功status[ptidx] == true, 并且是金字塔最底层, 计算特征点的误差值
         CV_Assert(status != NULL);
         // status[ptidx]初值为true
+        // flags & OPTFLOW_LK_GET_MIN_EIGENVALS == 0: 检查是否设置了计算最小特征值的标志。如果没有设置这个标志，才进行误差计算。
         if( status[ptidx] && err && level == 0 && (flags & OPTFLOW_LK_GET_MIN_EIGENVALS) == 0 )
         {
             // 计算当前特征点的误差值
@@ -799,6 +807,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             if( inextPoint.x < -winSize.width || inextPoint.x >= J.cols ||
                 inextPoint.y < -winSize.height || inextPoint.y >= J.rows )
             {
+                // 如果该特征点的整数坐标超出了图像的有效区域（即超出了图像的边界）
                 if( status )
                     status[ptidx] = false; // 如果追踪得到的坐标超出当前帧图像范围，认为追踪失败。
                 continue;
@@ -827,6 +836,10 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
                     errval += std::abs((float)diff);
                 }
             }
+            // 关于32的理解：
+            // 由于计算权重时放大了1 << W_BITS即2^14倍，计算残差时调用CV_DESCALE宏缩小了1 >> (W_BITS1-5),
+            // 因此这里需要再除以32，即残差结果归一化后，再缩小1 >> 5.即可以得到没有缩放的光度残差。
+            // 误差值（err[ptidx]）被归一化为单位像素的平均误差，用户可以用于评估该特征点匹配的质量。
             err[ptidx] = errval * 1.f/(32*winSize.width*cn*winSize.height); // 保存平均光度误差
         }
     }

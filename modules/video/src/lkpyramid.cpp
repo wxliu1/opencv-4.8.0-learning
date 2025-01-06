@@ -180,45 +180,58 @@ typedef float acctype;
 typedef float itemtype;
 #endif
 
+// @brief: tbb多线程并行调用仿函数来对多个点进行光流跟踪
+// Lucas-Kanade光流追踪算法的实现，用于计算连续帧之间特征点的位移。
+// 在每次迭代中，它通过计算图像的局部梯度和协方差矩阵来估算特征点的运动，并通过最小化误差来更新光流估计。
 void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 {
-    CV_INSTRUMENT_REGION();
+    CV_INSTRUMENT_REGION(); //? 用于性能分析和标记代码执行区域
 
+    // 计算半窗口大小 (winSize.width 和 winSize.height 是窗口的宽高)
     Point2f halfWin((winSize.width-1)*0.5f, (winSize.height-1)*0.5f);
+    // 获取前一帧图像（prevImg）、当前帧图像（nextImg）和前一帧图像的梯度（prevDeriv）
     const Mat& I = *prevImg;
     const Mat& J = *nextImg;
     const Mat& derivI = *prevDeriv;
 
+    // cn是图像的通道数，cn2是通道数的两倍（用于梯度）
     int j, cn = I.channels(), cn2 = cn*2;
-    cv::AutoBuffer<deriv_type> _buf(winSize.area()*(cn + cn2));
-    int derivDepth = DataType<deriv_type>::depth;
+    cv::AutoBuffer<deriv_type> _buf(winSize.area()*(cn + cn2)); // 创建一个缓冲区用于存储图像窗口和梯度信息
+    int derivDepth = DataType<deriv_type>::depth; // 获取梯度数据的深度
 
+    // 创建用于存储窗口内图像数据的矩阵（包括图像和梯度）：创建图像窗口的缓冲区和梯度窗口的缓冲区
     Mat IWinBuf(winSize, CV_MAKETYPE(derivDepth, cn), _buf.data());
     Mat derivIWinBuf(winSize, CV_MAKETYPE(derivDepth, cn2), _buf.data() + winSize.area()*cn);
 
+    // 遍历指定范围内的特征点：遍历range范围内的点的序号，对每一个点进行光流跟踪。
     for( int ptidx = range.start; ptidx < range.end; ptidx++ )
     {
+        // 获取当前特征点的位置，考虑不同层级的缩放 // 计算每个特征点在当前金字塔层的坐标 // 点坐标缩小到对应层
         Point2f prevPt = prevPts[ptidx]*(float)(1./(1 << level));
         Point2f nextPt;
         if( level == maxLevel )
         {
             if( flags & OPTFLOW_USE_INITIAL_FLOW )
                 nextPt = nextPts[ptidx]*(float)(1./(1 << level));
-            else
-                nextPt = prevPt;
+            else // 如果没有使用初始光流，则将当前点位置设为上一帧的点位置
+                nextPt = prevPt; //对于最高层来说，把前一帧的点作为当前帧跟踪点的坐标初值进行赋值
         }
-        else
-            nextPt = nextPts[ptidx]*2.f;
-        nextPts[ptidx] = nextPt;
+        else // 如果不是最后一层，将特征点位置缩放到当前层级
+            nextPt = nextPts[ptidx]*2.f; // 对于其它层， 直接把点坐标乘以2.0，作为初值
+        nextPts[ptidx] = nextPt; // 给当前帧追踪点数组对应序号的点赋初值
 
         Point2i iprevPt, inextPt;
+        // 对特征点进行半窗口偏移: 减去winSize的一半
         prevPt -= halfWin;
+        // 向下取整
         iprevPt.x = cvFloor(prevPt.x);
         iprevPt.y = cvFloor(prevPt.y);
 
+        // 判断特征点是否越界（超出了图像范围）
         if( iprevPt.x < -winSize.width || iprevPt.x >= derivI.cols ||
             iprevPt.y < -winSize.height || iprevPt.y >= derivI.rows )
         {
+            // 如果点的坐标超出界限，并且是最底层，认为该点跟踪失败，skip.
             if( level == 0 )
             {
                 if( status )
@@ -229,22 +242,32 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             continue;
         }
 
+        // 计算窗口内像素的插值权重
         float a = prevPt.x - iprevPt.x;
         float b = prevPt.y - iprevPt.y;
-        const int W_BITS = 14, W_BITS1 = 14;
-        const float FLT_SCALE = 1.f/(1 << 20);
+        const int W_BITS = 14, W_BITS1 = 14; // 定义权重的位数
+        const float FLT_SCALE = 1.f/(1 << 20); // 定义缩放因子，用于提高计算精度
+        // 计算窗口权重
         int iw00 = cvRound((1.f - a)*(1.f - b)*(1 << W_BITS));
         int iw01 = cvRound(a*(1.f - b)*(1 << W_BITS));
         int iw10 = cvRound((1.f - a)*b*(1 << W_BITS));
         int iw11 = (1 << W_BITS) - iw00 - iw01 - iw10;
 
-        int dstep = (int)(derivI.step/derivI.elemSize1());
-        int stepI = (int)(I.step/I.elemSize1());
-        int stepJ = (int)(J.step/J.elemSize1());
+        // 定义步长和加权矩阵的其他变量
+        // step：是cv::Mat类的一个属性，等同于step[0]
+        // step[0]: 图像一行元素的字节数，图1中，step[0]就是任意一行，比如row0，所有元素的字节数
+        // elemSize1()：图像中一个元素中的一个通道的字节数
+        // 梯度图derivI的第一行元素字节数 除以一个通道的字节数
+        // 即: w * channels * sizeof(data_type) / sizeof(data_type)
+        int dstep = (int)(derivI.step/derivI.elemSize1()); // 获取梯度图像的步长
+        int stepI = (int)(I.step/I.elemSize1()); // 获取前一帧图像的步长
+        int stepJ = (int)(J.step/J.elemSize1()); // 获取当前帧图像的步长
+        // 初始化协方差矩阵的元素
         acctype iA11 = 0, iA12 = 0, iA22 = 0;
         float A11, A12, A22;
 
 #if CV_SIMD128 && !CV_NEON
+        // SIMD优化代码（仅适用于x86架构），加速图像处理
         v_int16x8 qw0((short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01));
         v_int16x8 qw1((short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11));
         v_int32x4 qdelta_d = v_setall_s32(1 << (W_BITS1-1));
@@ -254,6 +277,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
 #if CV_NEON
 
+        // SIMD优化代码（适用于ARM架构）
         float CV_DECL_ALIGNED(16) nA11[] = { 0, 0, 0, 0 }, nA12[] = { 0, 0, 0, 0 }, nA22[] = { 0, 0, 0, 0 };
         const int shifter1 = -(W_BITS - 5); //negative so it shifts right
         const int shifter2 = -(W_BITS);
@@ -267,15 +291,17 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
 #endif
 
+        // 从前一帧图像中提取特征点所在的窗口，并计算该窗口的梯度
         // extract the patch from the first image, compute covariation matrix of derivatives
         int x, y;
         for( y = 0; y < winSize.height; y++ )
         {
+            // 获取当前行的图像数据和梯度数据
             const uchar* src = I.ptr() + (y + iprevPt.y)*stepI + iprevPt.x*cn;
             const deriv_type* dsrc = derivI.ptr<deriv_type>() + (y + iprevPt.y)*dstep + iprevPt.x*cn2;
 
-            deriv_type* Iptr = IWinBuf.ptr<deriv_type>(y);
-            deriv_type* dIptr = derivIWinBuf.ptr<deriv_type>(y);
+            deriv_type* Iptr = IWinBuf.ptr<deriv_type>(y); // 当前窗口的图像数据指针
+            deriv_type* dIptr = derivIWinBuf.ptr<deriv_type>(y); // 当前窗口的梯度数据指针
 
             x = 0;
 
@@ -435,6 +461,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             }
 #endif
 
+            // 遍历窗口中的每个像素，计算其加权值并更新协方差矩阵
             for( ; x < winSize.width*cn; x++, dsrc += 2, dIptr += 2 )
             {
                 int ival = CV_DESCALE(src[x]*iw00 + src[x+cn]*iw01 +
@@ -444,11 +471,11 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
                 int iyval = CV_DESCALE(dsrc[1]*iw00 + dsrc[cn2+1]*iw01 + dsrc[dstep+1]*iw10 +
                                        dsrc[dstep+cn2+1]*iw11, W_BITS1);
 
-                Iptr[x] = (short)ival;
-                dIptr[0] = (short)ixval;
-                dIptr[1] = (short)iyval;
+                Iptr[x] = (short)ival; // 存储图像窗口中的加权值
+                dIptr[0] = (short)ixval; // 存储x方向梯度
+                dIptr[1] = (short)iyval; // 存储y方向梯度
 
-                iA11 += (itemtype)(ixval*ixval);
+                iA11 += (itemtype)(ixval*ixval); // 计算协方差矩阵元素
                 iA12 += (itemtype)(ixval*iyval);
                 iA22 += (itemtype)(iyval*iyval);
             }
@@ -466,17 +493,21 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
         iA22 += nA22[0] + nA22[1] + nA22[2] + nA22[3];
 #endif
 
+        // 将计算得到的协方差矩阵进行缩放
         A11 = iA11*FLT_SCALE;
         A12 = iA12*FLT_SCALE;
         A22 = iA22*FLT_SCALE;
 
+        // 计算协方差矩阵的行列式和最小特征值
         float D = A11*A22 - A12*A12;
         float minEig = (A22 + A11 - std::sqrt((A11-A22)*(A11-A22) +
                         4.f*A12*A12))/(2*winSize.width*winSize.height);
 
+        // 如果需要，计算并保存最小特征值
         if( err && (flags & OPTFLOW_LK_GET_MIN_EIGENVALS) != 0 )
             err[ptidx] = (float)minEig;
 
+        // 如果最小特征值小于阈值或者行列式接近零，认为光流计算不可靠，跳过该点
         if( minEig < minEigThreshold || D < FLT_EPSILON )
         {
             if( level == 0 && status )
@@ -486,14 +517,17 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
         D = 1.f/D;
 
+        // 计算特征点在当前帧中的平移
         nextPt -= halfWin;
         Point2f prevDelta;
 
+        // 迭代计算特征点的平移，直到满足收敛条件
         for( j = 0; j < criteria.maxCount; j++ )
         {
             inextPt.x = cvFloor(nextPt.x);
             inextPt.y = cvFloor(nextPt.y);
 
+            // 如果特征点超出图像边界，则跳出迭代
             if( inextPt.x < -winSize.width || inextPt.x >= J.cols ||
                inextPt.y < -winSize.height || inextPt.y >= J.rows )
             {
@@ -502,12 +536,14 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
                 break;
             }
 
+            // 计算当前特征点的权重
             a = nextPt.x - inextPt.x;
             b = nextPt.y - inextPt.y;
             iw00 = cvRound((1.f - a)*(1.f - b)*(1 << W_BITS));
             iw01 = cvRound(a*(1.f - b)*(1 << W_BITS));
             iw10 = cvRound((1.f - a)*b*(1 << W_BITS));
             iw11 = (1 << W_BITS) - iw00 - iw01 - iw10;
+            // 计算当前特征点的光流位移
             acctype ib1 = 0, ib2 = 0;
             float b1, b2;
 #if CV_SIMD128 && !CV_NEON
@@ -661,6 +697,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             b1 = ib1*FLT_SCALE;
             b2 = ib2*FLT_SCALE;
 
+            // 计算光流的位移量
             Point2f delta( (float)((A12*b2 - A22*b1) * D),
                           (float)((A12*b1 - A11*b2) * D));
             //delta = -delta;
@@ -668,9 +705,11 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             nextPt += delta;
             nextPts[ptidx] = nextPt + halfWin;
 
+            // 如果光流的位移小于阈值，则认为已经收敛
             if( delta.ddot(delta) <= criteria.epsilon )
                 break;
 
+            // 如果两次迭代的位移差异非常小，认为已经收敛
             if( j > 0 && std::abs(delta.x + prevDelta.x) < 0.01 &&
                std::abs(delta.y + prevDelta.y) < 0.01 )
             {
@@ -680,9 +719,11 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             prevDelta = delta;
         }
 
+        // 如果需要，计算特征点的误差值
         CV_Assert(status != NULL);
         if( status[ptidx] && err && level == 0 && (flags & OPTFLOW_LK_GET_MIN_EIGENVALS) == 0 )
         {
+            // 计算当前特征点的误差值
             Point2f nextPoint = nextPts[ptidx] - halfWin;
             Point inextPoint;
 
@@ -697,6 +738,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
                 continue;
             }
 
+            // 计算当前帧图像的误差
             float aa = nextPoint.x - inextPoint.x;
             float bb = nextPoint.y - inextPoint.y;
             iw00 = cvRound((1.f - aa)*(1.f - bb)*(1 << W_BITS));
@@ -705,6 +747,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             iw11 = (1 << W_BITS) - iw00 - iw01 - iw10;
             float errval = 0.f;
 
+            // 计算误差值
             for( y = 0; y < winSize.height; y++ )
             {
                 const uchar* Jptr = J.ptr() + (y + inextPoint.y)*stepJ + inextPoint.x*cn;
@@ -754,6 +797,7 @@ int cv::buildOpticalFlowPyramid(InputArray _img, OutputArrayOfArrays pyramid, Si
 
     if(!lvl0IsSet)
     {
+        // 给第0层填充padding
         Mat& temp = pyramid.getMatRef(0);
 
         if(!temp.empty())
@@ -1254,7 +1298,7 @@ void SparsePyrLKOpticalFlowImpl::calc( InputArray _prevImg, InputArray _nextImg,
 
     // 将输入的前一帧特征点转换为 Mat 类型 ( vector<cv::Point2f> 转为InputArray 进而转为cv::Mat )
     Mat prevPtsMat = _prevPts.getMat();
-    const int derivDepth = DataType<cv::detail::deriv_type>::depth; // 导数图像的数据类型深度
+    const int derivDepth = DataType<cv::detail::deriv_type>::depth; // 导数图像（梯度图像）的数据类型深度
 
     // 检查最大金字塔层数和窗口大小的合法性
     CV_Assert( maxLevel >= 0 && winSize.width > 2 && winSize.height > 2 );
@@ -1271,6 +1315,32 @@ void SparsePyrLKOpticalFlowImpl::calc( InputArray _prevImg, InputArray _nextImg,
         _err.release();
         return;
     }
+
+    /*
+    
+void cv::_OutputArray::create	(	Size 	sz,
+int 	type,
+int 	i = -1,
+bool 	allowTransposed = false,
+int 	fixedDepthMask = 0 
+)		const
+
+参数解释
+Size sz
+sz 参数指定了输出数组的尺寸，即宽度和高度。它是一个 Size 类型的对象，通常通过 cv::Size(width, height) 来创建。
+
+int type
+type 参数指定输出数组的元素类型（即数据的深度和通道数）。例如，CV_8UC3 表示一个 8 位无符号整数的 3 通道图像，CV_32F 表示单通道的 32 位浮点数图像。
+
+int i = -1
+i 参数用于指定如果存在多个输出数组时选择特定的索引。默认值为 -1，表示创建一个单一的输出数组。如果你使用了多输出数组的情况，可能会传入一个特定的索引。
+
+bool allowTransposed = false
+allowTransposed 参数指示是否允许输出数组的转置。默认值为 false，表示不允许转置。如果设为 true，OpenCV 可能在某些操作中返回转置矩阵，这取决于操作的要求和效率优化。
+
+int fixedDepthMask = 0
+fixedDepthMask 参数用于指定是否强制输出数组的深度类型。在大多数情况下，你可以忽略它，默认值 0 表示没有特定的深度要求。如果你需要特定的深度类型，可以使用此参数来限制输出的深度。
+     */
 
     // 如果没有使用初始光流，则创建 _nextPts 用于存储估算的下一个特征点位置
     if( !(flags & OPTFLOW_USE_INITIAL_FLOW) )
@@ -1318,6 +1388,8 @@ void SparsePyrLKOpticalFlowImpl::calc( InputArray _prevImg, InputArray _nextImg,
         CV_Assert(levels1 >= 0);
 
         // 根据条件调整前一帧金字塔的步长
+        // 如果prevPyr[0].channels() * 2 == prevPyr[1].channels()成立说明金字塔容器还包含了梯度图
+        // 对于灰度图来说, 梯度图的channels==2
         if (levels1 % 2 == 1 && prevPyr[0].channels() * 2 == prevPyr[1].channels() && prevPyr[1].depth() == derivDepth)
         {
             lvlStep1 = 2;

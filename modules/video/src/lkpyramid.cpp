@@ -275,6 +275,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
 #if CV_SIMD128 && !CV_NEON
         // SIMD优化代码（仅适用于x86架构），加速图像处理
+        // 数据类型，例如cv::v_int8x16 表示int8_t的基本数据，16个。即类型在前，数量在后。
         v_int16x8 qw0((short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01));
         v_int16x8 qw1((short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11));
         v_int32x4 qdelta_d = v_setall_s32(1 << (W_BITS1-1));
